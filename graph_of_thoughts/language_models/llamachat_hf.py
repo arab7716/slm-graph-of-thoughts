@@ -18,7 +18,7 @@ class Llama2HF(AbstractLanguageModel):
     """
 
     def __init__(
-        self, config_path: str = "", model_name: str = "llama7b-hf", cache: bool = False
+    self, config_path: str = "", model_name: str = "llama7b-hf", cache: bool = False, temperature: float = None
     ) -> None:
         """
         Initialize an instance of the Llama2HF class with configuration, model details, and caching options.
@@ -40,6 +40,9 @@ class Llama2HF(AbstractLanguageModel):
         self.response_token_cost: float = self.config["response_token_cost"]
         # The temperature is defined as the randomness of the model's output.
         self.temperature: float = self.config["temperature"]
+        # adding temperature as an argument instead of pulling from config file
+        if temperature is not None:
+            self.temperature = temperature
         # Top K sampling.
         self.top_k: int = self.config["top_k"]
         # The maximum number of tokens to generate in the chat completion.
@@ -49,22 +52,27 @@ class Llama2HF(AbstractLanguageModel):
         os.environ["TRANSFORMERS_CACHE"] = self.config["cache_dir"]
         import transformers
 
-        hf_model_id = f"meta-llama/{self.model_id}"
+        # change from just meta llama models to add functionality for qwen 
+        hf_model_id = self.model_id 
         model_config = transformers.AutoConfig.from_pretrained(hf_model_id)
+        # no longer using bnb bc there were issues with loading it on neuronic
+        '''
         bnb_config = transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
+        '''
 
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(hf_model_id)
         self.model = transformers.AutoModelForCausalLM.from_pretrained(
             hf_model_id,
             trust_remote_code=True,
             config=model_config,
-            quantization_config=bnb_config,
-            device_map="auto",
+            torch_dtype=torch.float16,   # using 16 bit now
+            device_map={"": 0},          # force to gpu
+            low_cpu_mem_usage=True,      # important to save cpu ram 
         )
         self.model.eval()
         torch.no_grad()
@@ -75,32 +83,55 @@ class Llama2HF(AbstractLanguageModel):
 
     def query(self, query: str, num_responses: int = 1) -> List[Dict]:
         """
-        Query the LLaMA 2 model for responses.
+        Query the model for responses (using a reformatted proper chat template).
 
         :param query: The query to be posed to the language model.
         :type query: str
         :param num_responses: Number of desired responses, default is 1.
         :type num_responses: int
-        :return: Response(s) from the LLaMA 2 model.
+        :return: Response(s) from the model.
         :rtype: List[Dict]
         """
         if self.cache and query in self.response_cache:
             return self.response_cache[query]
+
+        #new chat template logic w <|im_start|> and proper instruction tuned formatting 
+        
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant. Always follow the instructions precisely and output the response exactly in the requested format."},
+            {"role": "user", "content": query}
+        ]
+        
+        # did NOT work (failed experiment) -- asking for just strict data significantly lowered output accuracy
+        '''
+        messages =[
+            {"role": "system", "content": "You are a strict data processor. You NEVER converse, NEVER apologize, and NEVER explain your reasoning. You only output raw, formatted data exactly as requested."},
+            {"role": "user", "content": query}
+        ]
+        '''
+        formatted_prompt = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
         sequences = []
-        query = f"<s><<SYS>>You are a helpful assistant. Always follow the intstructions precisely and output the response exactly in the requested format.<</SYS>>\n\n[INST] {query} [/INST]"
         for _ in range(num_responses):
             sequences.extend(
                 self.generate_text(
-                    query,
+                    formatted_prompt,
                     do_sample=True,
                     top_k=self.top_k,
+                    temperature=self.temperature,
                     num_return_sequences=1,
                     eos_token_id=self.tokenizer.eos_token_id,
-                    max_length=self.max_tokens,
+                    max_new_tokens=self.max_tokens,
+                    return_full_text=False  # returns only new text now
                 )
             )
+        # simplified response parsing
         response = [
-            {"generated_text": sequence["generated_text"][len(query) :].strip()}
+            {"generated_text": sequence["generated_text"].strip()}
             for sequence in sequences
         ]
         if self.cache:
