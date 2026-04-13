@@ -5,7 +5,8 @@
 # found in the LICENSE file.
 #
 # main author: Nils Blach
-
+# Reconfigured for proactive failure mitigation by Artha Abeysinghe 
+# Generative AI was used to assist partially with syntax. Every line of code was nonetheless thoroughly human reviewed.
 from __future__ import annotations
 import logging
 from enum import Enum
@@ -1192,7 +1193,7 @@ class ProactiveAggregate(Operation):
                             
                     elif self.validator_fn is not None:
                         self.logger.info(f"Similarity High ({avg_sim:.2f}). calling python validator...")
-                        is_valid = self.validator_fn(collapsed_output, base_state)
+                        is_valid = self.validator_fn(collapsed_output, previous_thought_states)
                         judge_response = "--NO LLM Judge Called, using Python Validator--"
                         if not is_valid: self.logger.warning("Python validator rejected merge.")
                     else:

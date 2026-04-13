@@ -7,7 +7,9 @@
 # The source code is adapted from the sorting source code written by
 # Nils Blach.
 #
-# main author: Robert Gerstenberger
+# main author: Robert Gerstenberger 
+# Reconfigured for proactive failure mitigation by Artha Abeysinghe 
+# Generative AI was used to assist partially with syntax. Every line of code was nonetheless thoroughly human reviewed.
 
 import os
 import logging
@@ -16,6 +18,7 @@ import json
 import csv
 from typing import Dict, List, Callable, Union
 from graph_of_thoughts import controller, language_models, operations, prompter, parser
+import argparse
 
 # This is a hack to also allow execution of this file from the examples directory
 try:
@@ -257,8 +260,68 @@ List 2: {input2}
         :rtype: str
         """
         pass
+    # all prompts for moe and llm judge
+    def moe_lenses_generate(self) -> List[str]:
+        return [
+            "THE REVERSE CHECKER: Assume your previous overlap was incomplete. Scan the lists backwards to catch missed elements.",
+            "THE SUBTRACTOR: Find all numbers in Set 1. Subtract any numbers that do NOT appear in Set 2. Output what remains.",
+            "THE DUPLICATE REMOVER: Combine both lists perfectly, and ensure no number appears twice in the final output."
+        ]
 
+    def moe_lenses_aggregate(self) -> List[str]:
+        return[
+            "THE CONCATENATOR: You are simply joining two lists of valid intersections. Do not drop any elements from either list.",
+            "THE DUPLICATE REMOVER: Combine both lists perfectly, and ensure no number appears twice in the final output.",
+            "THE SYNTAX ENFORCER: Output ONLY a flat Python list. No conversational text."
+        ]
+    def judge_prompt_generate(self, base_state: Dict, collapsed_output: str) -> str:
+        set1 = base_state.get("set1", "[]")
+        set2 = base_state.get("subset", base_state.get("set2", "[]"))
+        return (
+            f"You are a strict data validation AI.\n\n"
+            f"Task: Find the exact mathematical intersection of Set 1 and Set 2.\n\n"
+            f"Set 1: {set1}\n"
+            f"Set 2: {set2}\n\n"
+            f"Proposed Output:\n{collapsed_output}\n\n"
+            f"To verify if the output is perfect, follow these steps:\n"
+            f"Step 1: Iterate through every single number in Set 2. Check if it also exists in Set 1.\n"
+            f"Step 2: Create a list of all numbers found in BOTH sets.\n"
+            f"Step 3: Compare your list to the Proposed Output. Did the Proposed Output miss any numbers? Did it include numbers not present in BOTH sets?\n"
+            f"Step 4: Check if the Proposed Output is strictly a flat Python list with no conversational text.\n\n"
+            f"Write out your step-by-step verification. Conclude on a new line with exactly 'VERDICT: YES' if it is perfect, or 'VERDICT: NO' if it missed overlaps, hallucinated, or broke formatting."
+        )
 
+    def judge_prompt_aggregate(self, previous_thought_states: List[Dict], collapsed_output: str) -> str:
+        list1 = previous_thought_states[0].get("current", "[]")
+        list2 = previous_thought_states[1].get("current", "[]") if len(previous_thought_states) > 1 else "[]"
+        return (
+            f"You are a strict data validation AI.\n\n"
+            f"Task: Merge List 1 and List 2 into a single flat list. Do NOT remove duplicates.\n\n"
+            f"List 1: {list1}\n"
+            f"List 2: {list2}\n\n"
+            f"Proposed Output:\n{collapsed_output}\n\n"
+            f"To verify if the output is mathematically perfect, you MUST follow these steps:\n"
+            f"Step 1: Count the exact number of elements in List 1 and List 2. Sum these counts.\n"
+            f"Step 2: Count the exact number of elements in the Proposed Output array.\n"
+            f"Step 3: Compare the counts. If they do not match exactly, it dropped elements.\n"
+            f"Step 4: Check if the Proposed Output is strictly a flat Python list with no conversational text.\n\n"
+            f"Write out your step-by-step verification. Conclude on a new line with exactly 'VERDICT: YES' if it is perfect, or 'VERDICT: NO' if it dropped numbers or broke formatting."
+        )
+
+    def moe_critique_generate(self, collapsed_output: str, lens: str) -> str:
+        return (
+            f"\n\n[System Intervention]: Your previous output was evaluated as INCORRECT:\n"
+            f"=== FAILED OUTPUT ===\n{collapsed_output}\n=====================\n\n"
+            f"You must NOT generate this exact output again. To break your previous reasoning pattern, adopt this specific perspective:\n"
+            f"-> {lens}\n\n"
+            f"First, write 1-2 sentences applying this perspective to identify your mistake. "
+            f"Then, you MUST output the corrected data strictly formatted within brackets (e.g.,[x, y, z])."
+        )
+
+    def moe_critique_aggregate(self, collapsed_output: str, lens: str) -> str:
+        return self.moe_critique_generate(collapsed_output, lens)
+
+    
 class SetIntersectionParser(parser.Parser):
     """
     SetIntersectionParser provides the parsing of language model reponses
@@ -445,6 +508,28 @@ class SetIntersectionParser(parser.Parser):
         """
         pass
 
+def check_set_validity(output_str, previous_states_or_base_state):
+    try:
+        import ast, re
+        match = re.search(r'\[[\d,\s]+\]', str(output_str))
+        if not match: return False
+        out_set = set(ast.literal_eval(match.group()))
+        
+        # if aggregate logic:
+        if isinstance(previous_states_or_base_state, list): 
+            list1 = ast.literal_eval(previous_states_or_base_state[0].get("current", "[]"))
+            list2 = ast.literal_eval(previous_states_or_base_state[1].get("current", "[]"))
+            true_combined = set(list1).union(set(list2))
+            return out_set == true_combined
+            
+        # if generate logic:
+        base_state = previous_states_or_base_state
+        set1 = set(ast.literal_eval(re.search(r'\[[\d,\s]+\]', str(base_state.get("set1", "[]"))).group()))
+        set2 = set(ast.literal_eval(re.search(r'\[[\d,\s]+\]', str(base_state.get("subset", base_state.get("set2", "[]")))).group()))
+        
+        return out_set == set1.intersection(set2)
+    except:
+        return False
 
 def io() -> operations.GraphOfOperations:
     """
@@ -542,47 +627,88 @@ def tot2() -> operations.GraphOfOperations:
     return operations_graph
 
 
-def got() -> operations.GraphOfOperations:
-    """
-    Generates the Graph of Operations for the GoT method.
-
-    :return: Graph of Operations
-    :rtype: GraphOfOperations
-    """
+#helper fn for various ablations
+def create_proactive_got(intervention_enabled=True, use_llm_judge=True, use_moe=True, validator_fn=None):
     operations_graph = operations.GraphOfOperations()
 
     plans = operations.Generate(1, 1)
-    operations_graph.append_operation(plans)  # generate the sublists
+    operations_graph.append_operation(plans)
+    
+    branch_endpoints =[]
     for i in range(1, 3):
         list_id = f"List {i}"
         sub_list = operations.Selector(
-            lambda thoughts, list_id=list_id: [
-                thought for thought in thoughts if thought.state["part"] == list_id
-            ]
+            lambda thoughts, lid=list_id:[t for t in thoughts if t.state["part"] == lid]
         )
         sub_list.add_predecessor(plans)
         operations_graph.add_operation(sub_list)
-        intersected_subset = operations.Generate(1, 5)
+        
+        # proactive generate
+        intersected_subset = operations.ProactiveGenerate(1, 5, 0.90, intervention_enabled, use_llm_judge, use_moe, validator_fn)
         intersected_subset.add_predecessor(sub_list)
         operations_graph.add_operation(intersected_subset)
+        
         score_sub_list = operations.Score(1, False, utils.num_errors)
         score_sub_list.add_predecessor(intersected_subset)
         operations_graph.add_operation(score_sub_list)
+        
         keep_best_sub_list = operations.KeepBestN(1, False)
         keep_best_sub_list.add_predecessor(score_sub_list)
         operations_graph.add_operation(keep_best_sub_list)
+        branch_endpoints.append(keep_best_sub_list)
 
-    final_aggregate = operations.Aggregate(10)
-    operations_graph.append_operation(final_aggregate)
+    # proactive aggregate
+    final_aggregate = operations.ProactiveAggregate(10, 0.90, intervention_enabled, use_llm_judge, use_moe, validator_fn)
+    for endpoint in branch_endpoints: 
+        final_aggregate.add_predecessor(endpoint)
+    operations_graph.add_operation(final_aggregate)
+
     operations_graph.append_operation(operations.Score(1, False, utils.num_errors))
     keep_best_aggregate_final = operations.KeepBestN(1, False)
     operations_graph.append_operation(keep_best_aggregate_final)
 
-    operations_graph.append_operation(
-        operations.GroundTruth(utils.test_set_intersection)
-    )
-
+    operations_graph.append_operation(operations.GroundTruth(utils.test_set_intersection))
     return operations_graph
+
+def got_original() -> operations.GraphOfOperations:
+    # original got behavior
+    g = operations.GraphOfOperations()
+    plans = operations.Generate(1, 1)
+    g.append_operation(plans)
+    endpoints =[]
+    for i in range(1, 3):
+        sub_list = operations.Selector(lambda t, lid=f"List {i}": [x for x in t if x.state["part"] == lid])
+        sub_list.add_predecessor(plans)
+        g.add_operation(sub_list)
+        subset = operations.Generate(1, 5)
+        subset.add_predecessor(sub_list)
+        g.add_operation(subset)
+        score = operations.Score(1, False, utils.num_errors)
+        score.add_predecessor(subset)
+        g.add_operation(score)
+        keep = operations.KeepBestN(1, False)
+        keep.add_predecessor(score)
+        g.add_operation(keep)
+        endpoints.append(keep)
+    agg = operations.Aggregate(10)
+    for ep in endpoints: agg.add_predecessor(ep)
+    g.add_operation(agg)
+    g.append_operation(operations.Score(1, False, utils.num_errors))
+    g.append_operation(operations.KeepBestN(1, False))
+    g.append_operation(operations.GroundTruth(utils.test_set_intersection))
+    return g
+
+def got_2_nodes(): 
+    return create_proactive_got(intervention_enabled=False)
+
+def got_python_moe(): 
+    return create_proactive_got(use_llm_judge=False, use_moe=True, validator_fn=check_set_validity)
+
+def got_llm_no_moe(): 
+    return create_proactive_got(use_llm_judge=True, use_moe=False)
+
+def got_full(): 
+    return create_proactive_got(use_llm_judge=True, use_moe=True)
 
 
 def run(
@@ -590,23 +716,13 @@ def run(
     methods: List[Callable[[], operations.GraphOfOperations]],
     budget: float,
     lm_name: str,
+    config_path: str,
+    temperature: float = None,
 ) -> float:
     """
     Controller function that executes each specified method for each specified
-    sample while the budget is not exhausted.
-
-    :param data_ids: Indices of the sample to be run.
-    :type data_ids: List[int]
-    :param methods: List of functions to generate Graphs of Operations.
-    :type methods: Each function generates a Graph of Operation.
-    :param budget: Language model budget for the execution in dollars.
-    :type budget: float
-    :param lm_name: Name of the language model to be used.
-    :type lm_name: str
-    :return: Spent budget in dollars.
-    :rtype: float
+    sample.
     """
-
     orig_budget = budget
     data_path = os.path.join(os.path.dirname(__file__), "set_intersection_032.csv")
     data = []
@@ -621,14 +737,15 @@ def run(
     selected_data = [data[i] for i in data_ids]
 
     results_dir = os.path.join(os.path.dirname(__file__), "results")
-
-    if not os.path.exists(results_dir):
-        os.makedirs(results_dir)
+    # add output dir, temp config, + time tracking for metrics
+    os.makedirs(results_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    extra_info = f"{lm_name}_{'-'.join([method.__name__ for method in methods])}"
-    folder_name = f"{extra_info}_{timestamp}"
+    temp_val = temperature if temperature is not None else 0.6 
+    temp_str = f"_T{str(temp_val).replace('.', 'p')}"
+    extra_info = f"{lm_name}{temp_str}_{'-'.join([method.__name__ for method in methods])}"
+    folder_name = f"{extra_info}_{timestamp}_{os.getpid()}"
     results_folder = os.path.join(results_dir, folder_name)
-    os.makedirs(results_folder)
+    os.makedirs(results_folder, exist_ok=True)
 
     config = {
         "data": selected_data,
@@ -647,8 +764,12 @@ def run(
     )
 
     for method in methods:
-        # create a results directory for the method
-        os.makedirs(os.path.join(results_folder, method.__name__))
+        os.makedirs(os.path.join(results_folder, method.__name__), exist_ok=True)
+
+    # change to load model once
+    logging.info("Loading language model(once)")
+    lm = language_models.Llama2HF(config_path, model_name=lm_name, temperature=temperature)
+    logging.info("Language model loaded.")
 
     for data in selected_data:
         logging.info(f"Running data {data[0]}: {data[1]} {data[2]}")
@@ -665,14 +786,7 @@ def run(
                     f"Budget has been depleted, stopping. Method {method.__name__} has not been run."
                 )
                 break
-            lm = language_models.ChatGPT(
-                os.path.join(
-                    os.path.dirname(__file__),
-                    "../../graph_of_thoughts/language_models/config.json",
-                ),
-                model_name=lm_name,
-                cache=True,
-            )
+            # got rid of chatgpt config
             operations_graph = method()
             executor = controller.Controller(
                 lm,
@@ -688,16 +802,39 @@ def run(
                     "method": method.__name__,
                 },
             )
+
+            #timing
+            start_time = datetime.datetime.now().timestamp()
             try:
                 executor.run()
             except Exception as e:
                 logging.error(f"Exception: {e}")
+            end_time = datetime.datetime.now().timestamp()
+            execution_time = end_time - start_time
+                        
             path = os.path.join(
                 results_folder,
                 method.__name__,
                 f"{data[0]}.json",
             )
+            
+            #original graph json
             executor.output_graph(path)
+            
+            # put execution time
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    graph_data = json.load(f)
+                
+                # make sure type safe (for safety)
+                if isinstance(graph_data, dict):
+                    graph_data["execution_time_seconds"] = execution_time
+                elif isinstance(graph_data, list):
+                    graph_data.append({"execution_time_seconds": execution_time})
+                
+                with open(path, "w") as f:
+                    json.dump(graph_data, f, indent=4)
+            
             budget -= lm.cost
 
     return orig_budget - budget
@@ -715,11 +852,18 @@ if __name__ == "__main__":
     Output Example:
         [24, 10, 20, 8]
     """
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config_path", type=str, required=True, help="Path to the config file")
+    parser.add_argument("--model_name", type=str, default="qwen2.5-14b", help="Model name key from config.json")
+    parser.add_argument("--temperature", type=float, default=None, help="Override temperature from config")
+    args = parser.parse_args()
 
-    budget = 15
-    samples = [item for item in range(0, 100)]
-    approaches = [io, cot, tot, tot2, got]
+    budget = 100
+    # run on 50 samples
+    samples = [item for item in range(0, 10)]
+    
 
-    spent = run(samples, approaches, budget, "chatgpt")
+    approaches =[io, cot, got_original, got_2_nodes, got_python_moe, got_llm_no_moe, got_full]
+    spent = run(samples, approaches, budget, args.model_name, args.config_path, args.temperature)
 
     logging.info(f"Spent {spent} out of {budget} budget.")
