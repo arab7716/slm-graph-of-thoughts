@@ -704,6 +704,9 @@ def got_2_nodes():
 def got_python_moe(): 
     return create_proactive_got(use_llm_judge=False, use_moe=True, validator_fn=check_set_validity)
 
+def got_python_no_moe(): 
+    return create_proactive_got(use_llm_judge=False, use_moe=False, validator_fn=check_set_validity)
+
 def got_llm_no_moe(): 
     return create_proactive_got(use_llm_judge=True, use_moe=False)
 
@@ -863,7 +866,7 @@ if __name__ == "__main__":
     samples = [item for item in range(0, 10)]
     
 
-    approaches =[io, cot, got_original, got_2_nodes, got_python_moe, got_llm_no_moe, got_full]
+    approaches =[io, cot, got_original, got_2_nodes, got_python_moe,got_python_no_moe, got_llm_no_moe, got_full]
     spent = run(samples, approaches, budget, args.model_name, args.config_path, args.temperature)
 
     logging.info(f"Spent {spent} out of {budget} budget.")
