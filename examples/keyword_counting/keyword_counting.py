@@ -9,7 +9,10 @@
 #
 # main author: Nils Blach
 # contributions: Ales Kubicek
+# Reconfigured for proactive failure mitigation by Artha Abeysinghe 
+# Generative AI was used to assist partially with syntax. Every line of code was nonetheless thoroughly human reviewed.
 
+import argparse
 import os
 import logging
 import datetime
@@ -19,6 +22,7 @@ from collections import Counter
 from functools import partial
 from typing import Dict, List, Callable, Union
 from graph_of_thoughts import controller, language_models, operations, prompter, parser
+from functools import partial 
 
 
 def string_to_list(string: str) -> List[str]:
@@ -678,7 +682,7 @@ Combined Output:
 """
 
     got_improve_aggregate_prompt = """<Instruction> The following 2 dictionaries were combined into the third dictionary below. 
-However, some mistakes occurred and the third dictionary is incorrect. Please fix the third dictionary so that it contains the correct frequencies for each country.
+However, some mistakes occured and the third dictionary is incorrect. Please fix the third dictionary so that it contains the correct frequencies for each country.
 The correct frequencies are the sum of the frequencies from the first 2 dictionaries. If a country is not present in one of the dictionaries, add it to the final dictionary with the frequency from the other dictionary.
 
 <Example>
@@ -852,6 +856,65 @@ Output:
         """
         pass
 
+    def moe_lenses_generate(self) -> List[str]:
+        return [
+            "THE CONTEXT READER: You missed countries mentioned in passing. Re-read the text line-by-line and extract every country.",
+            "THE LINGUIST: Scan the text for capitalized words that represent geographical nations. Tally them carefully.",
+            "THE JSON VALIDATOR: Your previous output broke standard JSON format. Ensure all keys are strings in double quotes."
+        ]
+
+    def moe_lenses_aggregate(self) -> List[str]:
+        return [
+            "THE SUMMATION EXPERT: Mathematically add the values of matching keys from the input dictionaries. Do not miss any keys.",
+            "THE DICTIONARY MERGER: Ensure every single country listed in the input dictionaries appears in the final output dictionary.",
+            "THE JSON VALIDATOR: Output ONLY valid, parseable JSON format. Do not use markdown blocks or conversational apologies."
+        ]
+    
+    def judge_prompt_generate(self, base_state: Dict, collapsed_output: str) -> str:
+        raw_input = base_state.get("sub_text", base_state.get("original", "")).strip()
+        return (
+            f"You are a strict data validation AI.\n\n"
+            f"Task: Extract a JSON dictionary of countries and their frequencies from the Input Text.\n\n"
+            f"Input Text:\n{raw_input}\n\n"
+            f"Proposed Output:\n{collapsed_output}\n\n"
+            f"To verify if the output is perfect, follow these steps:\n"
+            f"Step 1: Check the Input Text. If it is completely empty or blank, the Proposed Output MUST be exactly {{}}. Is the input empty?\n"
+            f"Step 2: If not empty, list every country explicitly named in the text and tally its frequency.\n"
+            f"Step 3: Compare your tally to the Proposed Output. Do the keys and values match exactly?\n"
+            f"Step 4: Check if the Proposed Output is strictly a JSON dictionary with no conversational text or markdown.\n\n"
+            f"Write out your step-by-step verification. Conclude on a new line with exactly 'VERDICT: YES' if it is perfect, or 'VERDICT: NO' if it hallucinated, missed countries, or broke formatting."
+        )
+
+    def judge_prompt_aggregate(self, previous_thought_states: List[Dict], collapsed_output: str) -> str:
+        dict1 = previous_thought_states[0].get("current", "{}")
+        dict2 = previous_thought_states[1].get("current", "{}") if len(previous_thought_states) > 1 else "{}"
+        return (
+            f"You are a strict data validation AI.\n\n"
+            f"Task: Combine two frequency dictionaries by adding the values of matching keys.\n\n"
+            f"Dictionary 1: {dict1}\n"
+            f"Dictionary 2: {dict2}\n\n"
+            f"Proposed Output:\n{collapsed_output}\n\n"
+            f"To verify if the output is perfect, follow these steps:\n"
+            f"Step 1: List all unique keys from Dictionary 1 and Dictionary 2.\n"
+            f"Step 2: For each key, calculate the mathematical sum of its values from both dictionaries.\n"
+            f"Step 3: Compare your calculated sums to the Proposed Output. Do they match exactly?\n"
+            f"Step 4: Check if the Proposed Output is strictly a JSON dictionary with no conversational text or markdown.\n\n"
+            f"Write out your step-by-step verification. Conclude on a new line with exactly 'VERDICT: YES' if it is perfect, or 'VERDICT: NO' if the math is wrong or format is broken."
+        )
+
+    def moe_critique_generate(self, collapsed_output: str, lens: str) -> str:
+        return (
+            f"\n\n[System Intervention]: Your previous output was evaluated as INCORRECT:\n"
+            f"=== FAILED OUTPUT ===\n{collapsed_output}\n=====================\n\n"
+            f"You must NOT generate this exact output again. To break your previous reasoning pattern, adopt this specific perspective:\n"
+            f"-> {lens}\n\n"
+            f"First, write 1-2 sentences applying this perspective to identify your mistake. "
+            f"Then, you MUST output the corrected data strictly formatted as a JSON dictionary."
+        )
+
+    def moe_critique_aggregate(self, collapsed_output: str, lens: str) -> str:
+        return self.moe_critique_generate(collapsed_output, lens) # critique prompt can be the same
+
 
 class KeywordCountingParser(parser.Parser):
     """
@@ -1022,6 +1085,36 @@ class KeywordCountingParser(parser.Parser):
         """
         pass
 
+def check_keyword_validity(output_str, state_data):
+    """Python validator script"""
+    try:
+        import json, re
+        match = re.search(r'\{.*?\}', str(output_str), re.DOTALL)
+        if not match: return False
+        out_dict = json.loads(match.group())
+        
+        # aggregate
+        if isinstance(state_data, list):
+            dict1 = json.loads(state_data[0].get("current", "{}"))
+            dict2 = json.loads(state_data[1].get("current", "{}")) if len(state_data) > 1 else {}
+            
+            # add dicts
+            true_combined = {**dict1}
+            for k, v in dict2.items():
+                true_combined[k] = true_combined.get(k, 0) + v
+                
+            # normalize and compare
+            true_norm = {k.lower().strip(): v for k, v in true_combined.items() if v > 0}
+            out_norm = {k.lower().strip(): int(v) for k, v in out_dict.items() if int(v) > 0}
+            return true_norm == out_norm
+            
+        # generate
+        base_state = state_data
+        input_text = base_state.get("sub_text", base_state.get("original", "")).strip()
+        if not input_text: return len(out_dict) == 0
+        return True
+    except:
+        return False
 
 def io(all_potential_countries) -> operations.GraphOfOperations:
     """
@@ -1126,59 +1219,55 @@ def tot2(all_potential_countries) -> operations.GraphOfOperations:
     return operations_graph
 
 
-def got4(all_potential_countries) -> operations.GraphOfOperations:
-    """
-    Generates the Graph of Operations for the GoT4 method, which splits the text
-    into 4 passages.
 
-    :return: Graph of Operations
-    :rtype: GraphOfOperations
-    """
+#helper function for ablations
+def create_proactive_got4(all_potential_countries, intervention_enabled=True, use_llm_judge=True, use_moe=True, validator_fn=None):
     operations_graph = operations.GraphOfOperations()
 
     sub_texts = operations.Generate(1, 1)
-    operations_graph.append_operation(sub_texts)  # generate the sublists
-    sub_paragraphs = []
+    operations_graph.append_operation(sub_texts) 
+    
+    sub_paragraphs =[]
     for i in range(1, 5):
         paragraph_id = f"Paragraph {i}"
         sub_text = operations.Selector(
-            lambda thoughts, list_id=paragraph_id: [
-                thought for thought in thoughts if thought.state["part"] == list_id
-            ]
+            lambda thoughts, lid=paragraph_id: [t for t in thoughts if t.state["part"] == lid]
         )
         sub_text.add_predecessor(sub_texts)
         operations_graph.add_operation(sub_text)
-        count_sub_text = operations.Generate(1, 10)
+        
+        # proactive generate 
+        count_sub_text = operations.ProactiveGenerate(1, 10, 0.90, intervention_enabled, use_llm_judge, use_moe, validator_fn)
         count_sub_text.add_predecessor(sub_text)
         operations_graph.add_operation(count_sub_text)
-        score_sub_text = operations.Score(
-            1, False, partial(num_errors, all_potential_countries)
-        )
+        
+        score_sub_text = operations.Score(1, False, partial(num_errors, all_potential_countries))
         score_sub_text.add_predecessor(count_sub_text)
         operations_graph.add_operation(score_sub_text)
+        
         keep_best_sub_text = operations.KeepBestN(1, False)
         keep_best_sub_text.add_predecessor(score_sub_text)
         operations_graph.add_operation(keep_best_sub_text)
-
         sub_paragraphs.append(keep_best_sub_text)
 
+    # pairwise merging
     while len(sub_paragraphs) > 1:
-        new_sub_paragraphs = []
+        new_sub_paragraphs =[]
         for i in range(0, len(sub_paragraphs), 2):
-            aggregate = operations.Aggregate(3)
+            # proactive aggregate
+            aggregate = operations.ProactiveAggregate(3, 0.90, intervention_enabled, use_llm_judge, use_moe, validator_fn)
             aggregate.add_predecessor(sub_paragraphs[i])
             aggregate.add_predecessor(sub_paragraphs[i + 1])
             operations_graph.add_operation(aggregate)
-            val_im_aggregate = operations.ValidateAndImprove(
-                1, True, 3, valid_aggregation
-            )
+            
+            val_im_aggregate = operations.ValidateAndImprove(1, True, 3, valid_aggregation)
             val_im_aggregate.add_predecessor(aggregate)
             operations_graph.add_operation(val_im_aggregate)
-            score_aggregate = operations.Score(
-                1, False, partial(num_errors, all_potential_countries)
-            )
+            
+            score_aggregate = operations.Score(1, False, partial(num_errors, all_potential_countries))
             score_aggregate.add_predecessor(val_im_aggregate)
             operations_graph.add_operation(score_aggregate)
+            
             keep_best_aggregate = operations.KeepBestN(1, False)
             keep_best_aggregate.add_predecessor(score_aggregate)
             operations_graph.add_operation(keep_best_aggregate)
@@ -1186,8 +1275,67 @@ def got4(all_potential_countries) -> operations.GraphOfOperations:
         sub_paragraphs = new_sub_paragraphs
 
     operations_graph.append_operation(operations.GroundTruth(test_keyword_counting))
-
     return operations_graph
+
+# original
+def got4_original(all_potential_countries) -> operations.GraphOfOperations:
+    # using standard aggregate/generate for this
+    g = operations.GraphOfOperations()
+    sub_texts = operations.Generate(1, 1)
+    g.append_operation(sub_texts)
+    sub_paragraphs =[]
+    for i in range(1, 5):
+        sub_text = operations.Selector(lambda t, lid=f"Paragraph {i}":[x for x in t if x.state["part"] == lid])
+        sub_text.add_predecessor(sub_texts)
+        g.add_operation(sub_text)
+        count_sub_text = operations.Generate(1, 10)
+        count_sub_text.add_predecessor(sub_text)
+        g.add_operation(count_sub_text)
+        score_sub_text = operations.Score(1, False, partial(num_errors, all_potential_countries))
+        score_sub_text.add_predecessor(count_sub_text)
+        g.add_operation(score_sub_text)
+        keep_best_sub_text = operations.KeepBestN(1, False)
+        keep_best_sub_text.add_predecessor(score_sub_text)
+        g.add_operation(keep_best_sub_text)
+        sub_paragraphs.append(keep_best_sub_text)
+
+    while len(sub_paragraphs) > 1:
+        new_sub_paragraphs =[]
+        for i in range(0, len(sub_paragraphs), 2):
+            aggregate = operations.Aggregate(3)
+            aggregate.add_predecessor(sub_paragraphs[i])
+            aggregate.add_predecessor(sub_paragraphs[i + 1])
+            g.add_operation(aggregate)
+            val_im_aggregate = operations.ValidateAndImprove(1, True, 3, valid_aggregation)
+            val_im_aggregate.add_predecessor(aggregate)
+            g.add_operation(val_im_aggregate)
+            score_aggregate = operations.Score(1, False, partial(num_errors, all_potential_countries))
+            score_aggregate.add_predecessor(val_im_aggregate)
+            g.add_operation(score_aggregate)
+            keep_best_aggregate = operations.KeepBestN(1, False)
+            keep_best_aggregate.add_predecessor(score_aggregate)
+            g.add_operation(keep_best_aggregate)
+            new_sub_paragraphs.append(keep_best_aggregate)
+        sub_paragraphs = new_sub_paragraphs
+
+    g.append_operation(operations.GroundTruth(test_keyword_counting))
+    return g
+
+def got4_2_nodes(all_potential_countries): 
+    return create_proactive_got4(all_potential_countries, intervention_enabled=False)
+
+def got4_python_moe(all_potential_countries): 
+    return create_proactive_got4(all_potential_countries, use_llm_judge=False, use_moe=True, validator_fn=check_keyword_validity)
+
+
+def got4_python_no_moe(all_potential_countries): 
+    return create_proactive_got4(all_potential_countries, use_llm_judge=False, use_moe=False, validator_fn=check_keyword_validity)
+
+def got4_llm_no_moe(all_potential_countries): 
+    return create_proactive_got4(all_potential_countries, use_llm_judge=True, use_moe=False)
+
+def got4_full(all_potential_countries): 
+    return create_proactive_got4(all_potential_countries, use_llm_judge=True, use_moe=True)
 
 
 def got8(all_potential_countries) -> operations.GraphOfOperations:
@@ -1323,6 +1471,8 @@ def run(
     methods: List[Callable[[], operations.GraphOfOperations]],
     budget: float,
     lm_name: str,
+    config_path: str,
+    temperature: float = None, 
 ) -> float:
     """
     Controller function that executes each specified method for each specified
@@ -1338,10 +1488,11 @@ def run(
     :type lm_name: str
     :return: Spent budget in dollars.
     :rtype: float
+    added params for temp and config path
     """
 
     orig_budget = budget
-    data_path = os.path.join(os.path.dirname(__file__), "countries.csv")
+    data_path = os.path.join(os.path.dirname(__file__), "countries_simple.csv") # changed to modified dataset
     data = []
     with open(data_path, "r") as f:
         reader = csv.reader(f)
@@ -1358,14 +1509,21 @@ def run(
     selected_data = [data[i] for i in data_ids]
 
     results_dir = os.path.join(os.path.dirname(__file__), "results")
-
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
+
+    # renaming output folder
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    extra_info = f"{lm_name}_{'-'.join([method.__name__ for method in methods])}"
-    folder_name = f"{extra_info}_{timestamp}"
+    
+    # temps
+    temp_val = temperature if temperature is not None else 0.6
+    temp_str = f"_T{str(temp_val).replace('.', 'p')}"
+
+    extra_info = f"{lm_name}{temp_str}_{'-'.join([method.__name__ for method in methods])}"
+    folder_name = f"{extra_info}_{timestamp}_{os.getpid()}" # add pid
     results_folder = os.path.join(results_dir, folder_name)
-    os.makedirs(results_folder)
+    
+    os.makedirs(results_folder, exist_ok=True)
 
     config = {
         "data": selected_data,
@@ -1384,32 +1542,25 @@ def run(
     )
 
     for method in methods:
-        # create a results directory for the method
-        os.makedirs(os.path.join(results_folder, method.__name__))
+        os.makedirs(os.path.join(results_folder, method.__name__), exist_ok=True)
+
+    
+    logging.info("Loading model(once)")
+    # Use the passed 'lm_name' and 'temperature', NOT hardcoded string
+    lm = language_models.Llama2HF(config_path, model_name=lm_name, temperature=temperature)
+    logging.info(" model loaded.")
 
     for data in selected_data:
-        logging.info(f"Running data {data[0]}: {data[1]}")
+        logging.info(f"Running data {data[0]}")
         if budget <= 0.0:
-            logging.error(
-                f"Budget has been depleted, stopping. Data {data[0]} has not been run."
-            )
+            logging.error("Budget has been depleted, stopping.")
             break
         for method in methods:
             logging.info(f"Running method {method.__name__}")
-            logging.info(f"Budget left: {budget}")
             if budget <= 0.0:
-                logging.error(
-                    f"Budget has been depleted, stopping. Method {method.__name__} has not been run."
-                )
+                logging.error("Budget has been depleted, stopping.")
                 break
-            lm = language_models.ChatGPT(
-                os.path.join(
-                    os.path.dirname(__file__),
-                    "../../graph_of_thoughts/language_models/config.json",
-                ),
-                model_name=lm_name,
-                cache=True,
-            )
+           
             operations_graph = method(all_potential_countries)
             executor = controller.Controller(
                 lm,
@@ -1424,35 +1575,53 @@ def run(
                     "method": method.__name__,
                 },
             )
+            
+            # timing
+            start_time = datetime.datetime.now().timestamp()
             try:
                 executor.run()
             except Exception as e:
                 logging.error(f"Exception: {e}")
+            end_time = datetime.datetime.now().timestamp()
+            execution_time = end_time - start_time
+            
             path = os.path.join(
                 results_folder,
                 method.__name__,
                 f"{data[0]}.json",
             )
+            
             executor.output_graph(path)
+            # time metric 
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    graph_data = json.load(f)
+                
+                if isinstance(graph_data, dict):
+                    graph_data["execution_time_seconds"] = execution_time
+                elif isinstance(graph_data, list):
+                    graph_data.append({"execution_time_seconds": execution_time})
+                
+                with open(path, "w") as f:
+                    json.dump(graph_data, f, indent=4)
+
             budget -= lm.cost
 
     return orig_budget - budget
 
 
 if __name__ == "__main__":
-    """
-    Input (x)   : an input text with many occurrences of different countries (names)
-    Output (y)  : dict of all countries in the input text with their frequencies
-    Correct     : y == correct given list of x (dataset)
-    Input Example:
-        The music of Spain and the history of Spain deepened her love for Europe...
-    Output Example:
-        {Spain: 2, ...}
-    """
-    budget = 30
-    samples = [item for item in range(0, 100)]
-    approaches = [io, cot, tot, tot2, got4, got8, gotx]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config_path", type=str, required=True, help="Path to the config file")
+    parser.add_argument("--model_name", type=str, default="qwen2.5-14b", help="Model name key from config.json")
+    parser.add_argument("--temperature", type=float, default=None, help="Override temperature from config")
+    args = parser.parse_args()
 
-    spent = run(samples, approaches, budget, "chatgpt")
+    budget = 100
+    samples = [item for item in range(0, 10)] 
+    
+    approaches =[io, cot, got4_original, got4_2_nodes, got4_python_moe, got4_python_no_moe, got4_llm_no_moe, 
+    got4_full]
+    spent = run(samples, approaches, budget, args.model_name, args.config_path, args.temperature)
 
     logging.info(f"Spent {spent} out of {budget} budget.")
