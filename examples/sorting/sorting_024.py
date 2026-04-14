@@ -708,7 +708,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     budget = 100
-    samples = list(range(10))
+    samples = list(range(100))
     
     
     approaches =[

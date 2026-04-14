@@ -1618,7 +1618,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     budget = 100
-    samples = [item for item in range(0, 10)] 
+    samples = [item for item in range(0, 100)] 
     
     approaches =[io, cot, got4_original, got4_2_nodes, got4_python_moe, got4_python_no_moe, got4_llm_no_moe, 
     got4_full]

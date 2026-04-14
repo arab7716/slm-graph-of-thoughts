@@ -863,7 +863,7 @@ if __name__ == "__main__":
 
     budget = 100
     # run on 50 samples
-    samples = [item for item in range(0, 10)]
+    samples = [item for item in range(0, 100)]
     
 
     approaches =[io, cot, got_original, got_2_nodes, got_python_moe,got_python_no_moe, got_llm_no_moe, got_full]
